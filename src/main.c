@@ -1,162 +1,278 @@
 #include "raylib.h"
 #include "raymath.h"
-#include <math.h>
+#include <stdio.h> // Pour NULL
 
-// --- MATHS (Identique) ---
+#if defined(PLATFORM_DESKTOP)
+    #define GLSL_VERSION 330
+#else
+    #define GLSL_VERSION 100
+#endif
+#define NB_SCENES 5 //TODO changer si c'est pas le cas
+
+// --- 1. DÉFINITION DE LA STRUCTURE DE SCÈNE ---
 typedef struct {
-    bool hit;
-    float dist;
-    Vector3 point;
-    Vector3 normal;
-} HitInfo;
+    void (*Init)(void);
+    void (*Update)(float time, float delta);
+    void (*Draw)(void);
+    void (*Unload)(void);
+    float duration; // Durée de la scène en secondes
+} Scene;
 
-HitInfo IntersectSphere(Vector3 ro, Vector3 rd, Vector3 sPos, float sRad) {
-    HitInfo info = { 0 }; info.dist = 10000.0f;
-    Vector3 oc = Vector3Subtract(ro, sPos);
-    float b = Vector3DotProduct(oc, rd);
-    float c = Vector3DotProduct(oc, oc) - sRad*sRad;
-    float h = b*b - c;
-    if (h < 0.0f) return info;
-    float t = -b - sqrtf(h);
-    if (t > 0.0f) {
-        info.hit = true; info.dist = t;
-        info.point = Vector3Add(ro, Vector3Scale(rd, t));
-        info.normal = Vector3Normalize(Vector3Subtract(info.point, sPos));
-    }
-    return info;
-}
-
-HitInfo IntersectPlane(Vector3 ro, Vector3 rd, float planeY) {
-    HitInfo info = { 0 }; info.dist = 10000.0f;
-    if (fabs(rd.y) > 0.001f) {
-        float t = (planeY - ro.y) / rd.y;
-        if (t > 0.0f) {
-            info.hit = true; info.dist = t;
-            info.point = Vector3Add(ro, Vector3Scale(rd, t));
-            info.normal = (Vector3){ 0, 1, 0 };
-        }
-    }
-    return info;
-}
-
-int main(void)
-{
-    const int screenWidth = 1280;
-    const int screenHeight = 720;
-    SetConfigFlags(FLAG_MSAA_4X_HINT);
-    InitWindow(screenWidth, screenHeight, "Raylib - Mouse Ray Tracing");
-
-    Shader shader = LoadShader(0, "dark.fs"); // Nom du nouveau shader
+// --- VARIABLES GLOBALES (Accessibles par toutes les scènes) ---
+Camera camera = { 0 };
+float globalTime = 0.0f;
+Shader shaders[NB_SCENES] = {0};
+// -------------------------------------------------------------------------
+// --- SCÈNE 1 : LE CUBE ET LE DAMIER (Ton code d'origine) ---
+// -------------------------------------------------------------------------
+Model modelCube;
+Model modelsol;
+Texture2D textureDamier;
+int timeParamLoc;
+const char * gouraud_vs =
+    "#version 330\n"
+    "in vec3 vertexPosition;\n"
+    "in vec3 vertexNormal;\n"
+    "in vec2 vertexTexCoord;\n"
+    "in vec4 vertexColor;\n"
     
-    int resLoc = GetShaderLocation(shader, "resolution");
-    int camPosLoc = GetShaderLocation(shader, "camPos");
-    int camTargetLoc = GetShaderLocation(shader, "camTarget");
-    int lightPosLoc = GetShaderLocation(shader, "lightPos");
-    int lightActiveLoc = GetShaderLocation(shader, "lightActive");
+    "uniform mat4 mvp;\n"
+    "uniform mat4 matModel;\n"
+    "uniform vec3 lightPos;\n"
+    "uniform vec3 viewPos;\n"
+    "uniform vec4 colDiffuse;\n"
+    
+    "out vec4 fragColor;\n"
+    
+    "void main() {\n"
+    "    vec3 worldPos = vec3(matModel * vec4(vertexPosition, 1.0));\n"
+    "    vec3 N = normalize(vec3(matModel * vec4(vertexNormal, 0.0)));\n"
+    "    vec3 L = normalize(lightPos - worldPos);\n"
+    
+    "    // Ambiante\n"
+    "    float ambientStrength = 0.1;\n"
+    "    vec3 ambient = ambientStrength * vec3(1.0, 1.0, 1.0);\n"
+    
+    "    // Diffuse\n"
+    "    float diff = max(dot(N, L), 0.0);\n"
+    "    vec3 diffuse = diff * vec3(1.0, 1.0, 1.0);\n"
+    
+    "    // Speculaire (Gouraud style)\n"
+    "    float specularStrength = 0.5;\n"
+    "    vec3 V = normalize(viewPos - worldPos);\n"
+    "    vec3 R = reflect(-L, N);\n"
+    "    float spec = pow(max(dot(V, R), 0.0), 16.0);\n"
+    "    vec3 specular = specularStrength * spec * vec3(1.0, 1.0, 1.0);\n"
+    
+    "    vec3 result = (ambient + diffuse) * colDiffuse.rgb + specular;\n"
+    "    fragColor = vec4(result, 1.0);\n"
+    "    gl_Position = mvp * vec4(vertexPosition, 1.0);\n"
+    "}\n";
 
-    float resolution[2] = { (float)screenWidth, (float)screenHeight };
-    SetShaderValue(shader, resLoc, resolution, SHADER_UNIFORM_VEC2);
-
-    Camera3D camera = { 0 };
-    camera.position = (Vector3){ 0.0f, 2.0f, 4.0f };
-    camera.target = (Vector3){ 0.0f, 0.0f, 0.0f };
+const char* gouraud_fs = 
+    "#version 330\n"
+    "in vec4 fragColor;\n"
+    "out vec4 finalColor;\n"
+    "void main() {\n"
+    "    finalColor = fragColor;\n"
+    "}\n";
+Shader shader_eclairage; //en global pour qu'il soit effacé apres
+int lightPosLoc;
+int viewPosLoc;
+void InitScene1(void) {
+    // Caméra spécifique à la scène 1
+    camera.position = (Vector3){ 4.0f, 4.0f, 4.0f };
+    camera.target = (Vector3){ 0.0f, 0.5f, 0.0f };
     camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
     camera.fovy = 45.0f;
-    camera.projection = CAMERA_PERSPECTIVE;
 
-    // Définition de la scène physique (doit matcher le shader)
-    Vector3 spherePos = { 0.0f, 0.0f, 0.0f };
-    float sphereRadius = 1.0f;
+    // Génération texture
+    int width = 256; int height = 256; int squareSize = 32;
+    Color colors[2] = { BLACK, WHITE };
+    Image damier = GenImageColor(width, height, BLANK);
+    
+    // Ton algo de damier optimisé pour ImageDrawPixel (plus sûr que l'accès pointeur direct parfois)
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int colorIndex = ((x / squareSize) + (y / squareSize)) % 2;
+            ImageDrawPixel(&damier, x, y, colors[colorIndex]);
+        }
+    }
+    shader_eclairage = LoadShaderFromMemory(gouraud_vs, gouraud_fs);
+    lightPosLoc = GetShaderLocation(shader_eclairage, "lightPos");
+    viewPosLoc = GetShaderLocation(shader_eclairage, "viewPos");
+    textureDamier = LoadTextureFromImage(damier);
+    UnloadImage(damier);
+    Mesh sol = GenMeshPlane(10.0f, 10.0f, 100.0f, 100.0f);
+    modelsol = LoadModelFromMesh(sol);
+    Mesh mesh = GenMeshCube(2.0f, 2.0f, 2.0f);
+    modelCube = LoadModelFromMesh(mesh);
+    modelCube.materials[0].maps[MATERIAL_MAP_ALBEDO].color = RED;
+    modelCube.materials[0].shader = shader_eclairage;
+    modelsol.materials[0].maps[MATERIAL_MAP_ALBEDO].texture = textureDamier;
+    modelsol.materials[0].shader = shader_eclairage;
+}
 
-    SetTargetFPS(6000);
+void UpdateScene1(float time, float delta) {
+    // Rotation automatique caméra (effet demoscene)
+    float rotSpeed = 0.5f;
+    camera.position.x = sin(time * rotSpeed) * 5.0f;
+    camera.position.z = cos(time * rotSpeed) * 5.0f;
+    UpdateCamera(&camera, CAMERA_PERSPECTIVE);
+}
+
+void DrawScene1(void) {
+    DrawGrid(10, 1.0f);
+    DrawModel(modelCube, (Vector3){0, 1.0f, 0}, 1.0f, WHITE);
+    DrawModel(modelsol, (Vector3){0, 0.0f, 0}, 1.0f, WHITE);
+}
+
+void UnloadScene1(void) {
+    UnloadTexture(textureDamier);
+    UnloadModel(modelCube);
+}
+
+// -------------------------------------------------------------------------
+// --- SCÈNE 2 : UN TUNNEL TRON (Exemple de changement) ---
+// -------------------------------------------------------------------------
+// On utilise des variables statiques pour éviter les conflits de noms globaux
+static const int MAX_COLUMNS = 20;
+
+void InitScene2(void) {
+    camera.position = (Vector3){ 0.0f, 1.0f, 0.0f };
+    camera.target = (Vector3){ 0.0f, 1.0f, 10.0f }; // Regarde au loin
+    camera.up = (Vector3){ 0.0f, 1.0f, 0.0f };
+    camera.fovy = 60.0f;
+}
+
+void UpdateScene2(float time, float delta) {
+    // Avance la caméra tout droit
+    camera.position.z = time * 5.0f; 
+    camera.target.z = camera.position.z + 10.0f;
+    UpdateCamera(&camera, CAMERA_PERSPECTIVE);
+}
+
+void DrawScene2(void) {
+    // Dessine un tunnel infini en répétant des cubes
+    float spacing = 2.0f;
+    int visibleDistance = 20;
+    
+    // On calcule où commencer à dessiner par rapport à la caméra
+    int startZ = (int)(camera.position.z / spacing);
+
+    for (int i = 0; i < visibleDistance; i++) {
+        float z = (startZ + i) * spacing;
+        
+        // Effet de couleur pulsée
+        Color col = (i % 2 == 0) ? RED : DARKBLUE;
+        
+        // Dessine des arches
+        DrawCube((Vector3){-2.0f, 1.0f, z}, 0.5f, 2.0f, 0.5f, col); // Gauche
+        DrawCube((Vector3){ 2.0f, 1.0f, z}, 0.5f, 2.0f, 0.5f, col); // Droite
+        DrawCube((Vector3){ 0.0f, 2.5f, z}, 4.5f, 0.5f, 0.5f, col); // Haut
+    }
+}
+
+void UnloadScene2(void) {
+    // Rien à décharger ici (pas de textures chargées)
+}
+
+// -------------------------------------------------------------------------
+// --- MAIN ---
+// -------------------------------------------------------------------------
+int main(void)
+{
+    const int screenWidth = 800;
+    const int screenHeight = 450;
+    SetConfigFlags(FLAG_MSAA_4X_HINT);
+    InitWindow(screenWidth, screenHeight, "Demoscene Engine - Raylib");
+
+    // --- CONFIGURATION DU SHADER POST-PROCESS (VHS) ---
+    Shader shader1 = LoadShader(0, "vhs.fs");
+
+    shaders[0] = shader1;
+    
+    RenderTexture2D target = LoadRenderTexture(screenWidth, screenHeight);
+    
+    // --- TIMELINE / PLAYLIST DES SCÈNES ---
+    Scene scenes[] = {
+        { InitScene1, UpdateScene1, DrawScene1, UnloadScene1, 5.0f }, // Scène 1 dure 5s
+        { InitScene2, UpdateScene2, DrawScene2, UnloadScene2, 8.0f }  // Scène 2 dure 8s
+    };
+    int sceneCount = sizeof(scenes) / sizeof(scenes[0]);
+    int currentSceneIndex = 0;
+    float sceneTimer = 0.0f; // Temps écoulé dans la scène actuelle
+
+    // Init de la première scène
+    scenes[currentSceneIndex].Init();
+
+    SetTargetFPS(60);
 
     while (!WindowShouldClose())
     {
-        // Contrôle caméra (Clic droit seulement)
-        if (IsMouseButtonDown(MOUSE_BUTTON_RIGHT)) UpdateCamera(&camera, CAMERA_ORBITAL);
+        float delta = GetFrameTime();
+        globalTime = GetTime();
+        sceneTimer += delta;
 
-        // 1. LE RAYON DE LA SOURIS (Ray Casting)
-        // Ce rayon part de la caméra et passe par le pixel de la souris
-        Ray mouseRay = GetMouseRay(GetMousePosition(), camera);
+        // --- GESTION DU CHANGEMENT DE SCÈNE ---
+        if (sceneTimer > scenes[currentSceneIndex].duration || IsKeyPressed(KEY_SPACE)) {
+            // 1. Nettoyer l'ancienne scène
+            scenes[currentSceneIndex].Unload();
+            
+            // 2. Passer à la suivante (boucle au début si fini)
+            currentSceneIndex = (currentSceneIndex + 1) % sceneCount;
+            sceneTimer = 0.0f;
+            
+            // 3. Charger la nouvelle
+            scenes[currentSceneIndex].Init();
+        }
 
-        // 2. CALCUL DES COLLISIONS CPU
-        HitInfo hitS = IntersectSphere(mouseRay.position, mouseRay.direction, spherePos, sphereRadius);
-        HitInfo hitP = IntersectPlane(mouseRay.position, mouseRay.direction, -1.0f);
+        // --- UPDATE ---
+        // On appelle l'Update de la scène active
+        scenes[currentSceneIndex].Update(globalTime, delta);
+
+        //update du shader
+        if (currentSceneIndex == 1){
+            timeParamLoc = GetShaderLocation(shaders[1], "time");
+            lightPosLoc = GetShaderLocation(shader_eclairage, "lightPos");
+            viewPosLoc = GetShaderLocation(shader_eclairage, "viewPos");
+            SetShaderValue(shaders[0], timeParamLoc, &globalTime, SHADER_UNIFORM_FLOAT);}
+
+        // --- DRAW ---
+        BeginTextureMode(target);
+            ClearBackground(BLACK); // Fond noir pour le cinéma
+            BeginMode3D(camera);
+                // On appelle le Draw de la scène active
+                scenes[currentSceneIndex].Draw();
+            EndMode3D();
+        EndTextureMode();
         
-        HitInfo closestHit = {0};
-        closestHit.dist = 100.0f;
-        bool hasHit = false;
-
-        if (hitS.hit && hitS.dist < closestHit.dist) { closestHit = hitS; hasHit = true; }
-        if (hitP.hit && hitP.dist < closestHit.dist) { closestHit = hitP; hasHit = true; }
-
-        // 3. ENVOI AU SHADER
-        float camP[3] = { camera.position.x, camera.position.y, camera.position.z };
-        float camT[3] = { camera.target.x, camera.target.y, camera.target.z };
-        float lPos[3] = { closestHit.point.x, closestHit.point.y, closestHit.point.z };
-        float lActive = hasHit ? 1.0f : 0.0f;
-
-        SetShaderValue(shader, camPosLoc, camP, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, camTargetLoc, camT, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, lightPosLoc, lPos, SHADER_UNIFORM_VEC3);
-        SetShaderValue(shader, lightActiveLoc, &lActive, SHADER_UNIFORM_FLOAT);
-
         BeginDrawing();
             ClearBackground(BLACK);
-
-            // A. DESSIN DU SHADER (La scène obscure)
-            BeginShaderMode(shader);
-                DrawRectangle(0, 0, screenWidth, screenHeight, WHITE);
+            
+            BeginShaderMode(shaders[currentSceneIndex]);
+                // Dessin de la Render Texture (Y inversé)
+                DrawTextureRec(target.texture, 
+                              (Rectangle){ 0, 0, (float)target.texture.width, (float)-target.texture.height }, 
+                              (Vector2){ 0, 0 }, WHITE);
             EndShaderMode();
-
-            // B. VISUALISATION DES RAYONS (Overlay)
-            BeginMode3D(camera);
-                BeginBlendMode(BLEND_ADDITIVE);
-
-                // --- 1. LE RAYON PRIMAIRE (De la caméra à l'objet) ---
-                // On ne le dessine que s'il touche, sinon on dessine un trait vers l'infini
-                Vector3 endPoint = hasHit ? closestHit.point : Vector3Add(mouseRay.position, Vector3Scale(mouseRay.direction, 50.0f));
-                
-                // Dessin d'un "faisceau" (plusieurs lignes pour l'épaisseur)
-                Color beamCol = SKYBLUE;
-                beamCol.a = 150;
-                DrawLine3D(Vector3Add(camera.position, (Vector3){0,-0.1,0}), endPoint, beamCol); // Léger décalage pour voir le rayon sortir
-                
-                // --- 2. LE REBOND (Si collision) ---
-                if (hasHit) {
-                    // Point d'impact
-                    DrawSphere(closestHit.point, 0.05f, WHITE);
-                    
-                    // Calcul du vecteur réfléchi : R = I - 2(N.I)N
-                    Vector3 incident = mouseRay.direction;
-                    Vector3 normal = closestHit.normal;
-                    Vector3 reflected = Vector3Reflect(incident, normal);
-                    
-                    // Dessin du rayon réfléchi (Rouge pour bien le voir)
-                    Vector3 bounceEnd = Vector3Add(closestHit.point, Vector3Scale(reflected, 5.0f)); // 5 mètres de long
-                    
-                    // On vérifie si le rebond tape autre chose (ex: rebond du sol vers la sphère)
-                    // C'est ça le vrai raytracing !
-                    HitInfo bounceS = IntersectSphere(closestHit.point, reflected, spherePos, sphereRadius);
-                    if(bounceS.hit && bounceS.dist > 0.01f) {
-                        bounceEnd = bounceS.point; // Le rebond s'arrête sur l'obstacle suivant
-                        DrawSphere(bounceEnd, 0.03f, RED); // Impact secondaire
-                    }
-                    
-                    DrawLine3D(closestHit.point, bounceEnd, RED);
-                }
-
-                EndBlendMode();
-            EndMode3D();
-
+            
+            // UI Debug
             DrawFPS(10, 10);
-            DrawText("Souris = Rayon | Clic Droit = Caméra", 10, 30, 20, GRAY);
-            if(!hasHit) DrawText("MISS", 10, 50, 20, DARKGRAY);
-
+            DrawText(TextFormat("SCENE: %d / TIME: %.2f", currentSceneIndex + 1, sceneTimer), 10, 30, 20, GREEN);
+            DrawText("SPACE to skip scene", 10, 50, 10, GRAY);
         EndDrawing();
     }
 
-    UnloadShader(shader);
+    // Cleanup Final
+    scenes[currentSceneIndex].Unload(); // Décharger la dernière scène active
+    UnloadRenderTexture(target);
+    //UnloadShader(shader);
+    // Décharger tous les shaders
+    for (int i = 0; i < sizeof(shaders) / sizeof(shaders[0]); i++) {
+        UnloadShader(shaders[i]);
+    }
+    UnloadShader(shader_eclairage);
     CloseWindow();
 
     return 0;
